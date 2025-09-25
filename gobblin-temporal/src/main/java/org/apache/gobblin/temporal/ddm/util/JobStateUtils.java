@@ -27,6 +27,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
+import com.google.common.collect.Lists;
 import com.google.common.io.Closer;
 import com.typesafe.config.ConfigFactory;
 
@@ -38,6 +39,7 @@ import org.apache.gobblin.broker.gobblin_scopes.GobblinScopeTypes;
 import org.apache.gobblin.broker.gobblin_scopes.JobScopeInstance;
 import org.apache.gobblin.broker.iface.SharedResourcesBroker;
 import org.apache.gobblin.configuration.ConfigurationKeys;
+import org.apache.gobblin.data.management.copy.CopySource;
 import org.apache.gobblin.metastore.FsStateStore;
 import org.apache.gobblin.metastore.StateStore;
 import org.apache.gobblin.runtime.AbstractJobLauncher;
@@ -196,24 +198,32 @@ public class JobStateUtils {
     Path targetDirPath = getWorkUnitsPath(workDirRootPath);
 
     int numThreads = ParallelRunner.getNumThreadsConfig(jobState.getProperties());
-    Closer closer = Closer.create(); // (NOTE: try-with-resources syntax wouldn't allow `catch { closer.rethrow(t) }`)
-    try {
-      ParallelRunner parallelRunner = closer.register(new ParallelRunner(numThreads, fs));
-
-      JobLauncherUtils.WorkUnitPathCalculator pathCalculator = new JobLauncherUtils.WorkUnitPathCalculator();
-      int i = 0;
-      for (WorkUnit workUnit : workUnits) {
-        // tunnel each WU's size info via its filename, for `EagerFsDirBackedWorkUnitClaimCheckWorkload#extractTunneledWorkUnitSizeInfo`
-        Path workUnitFile = pathCalculator.calcNextPathWithTunneledSizeInfo(workUnit, jobId, targetDirPath);
-        if (i++ == 0) {
-          log.info("Writing work unit file [first of {}]: '{}'", workUnits.size(), workUnitFile);
+    int filesWritten = 0;
+    for (List<WorkUnit> batchedWorkUnits : Lists.partition(workUnits, numThreads * 50)) {
+      Closer closer = Closer.create(); // (NOTE: try-with-resources syntax wouldn't allow `catch { closer.rethrow(t) }`)
+      try {
+        ParallelRunner parallelRunner = closer.register(new ParallelRunner(numThreads, fs));
+        JobLauncherUtils.WorkUnitPathCalculator pathCalculator = new JobLauncherUtils.WorkUnitPathCalculator();
+        int i = 0;
+        for (WorkUnit workUnit : batchedWorkUnits) {
+          // tunnel each WU's size info via its filename, for `EagerFsDirBackedWorkUnitClaimCheckWorkload#extractTunneledWorkUnitSizeInfo`
+          Path workUnitFile = pathCalculator.calcNextPathWithTunneledSizeInfo(workUnit, jobId, targetDirPath);
+          if (i++ == 0) {
+            log.info("Writing work unit file [first of {}]: '{}'", workUnits.size(), workUnitFile);
+          }
+          parallelRunner.serializeToFile(workUnit, workUnitFile);
         }
-        parallelRunner.serializeToFile(workUnit, workUnitFile);
+        filesWritten += batchedWorkUnits.size();
+        log.info("Finished writing {} work units to directory: '{}'", filesWritten, targetDirPath);
+        CopySource.printMemoryStats(-15);
+//        System.gc();
+//        log.info("After GC");
+//        CopySource.printMemoryStats(-16);
+      } catch (Throwable t) {
+        throw closer.rethrow(t);
+      } finally {
+        closer.close();
       }
-    } catch (Throwable t) {
-      throw closer.rethrow(t);
-    } finally {
-      closer.close();
     }
   }
 

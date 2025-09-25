@@ -233,7 +233,7 @@ public class CopyDataPublisher extends DataPublisher implements UnpublishedHandl
   /** Organizes and encapsulates access to {@link WorkUnitState}s according to useful access patterns. */
   @AllArgsConstructor
   private static class WorkUnitStatesHelper {
-    private final Collection<WorkUnitState> workUnitStates;
+    private Collection<WorkUnitState> workUnitStates;
 
     public boolean isEmpty() {
       return workUnitStates.isEmpty();
@@ -302,6 +302,10 @@ public class CopyDataPublisher extends DataPublisher implements UnpublishedHandl
       }
       return states;
     }
+
+    public void clearNonPublishStep() throws IOException {
+      workUnitStates = getPostPublishStates();
+    }
   }
 
   /**
@@ -359,7 +363,17 @@ public class CopyDataPublisher extends DataPublisher implements UnpublishedHandl
     // maintain a list of iceberg partition data files to be used in IcebergOverwritePartitionsStep if applicable.
     // This is required for the final commit step where all the data files are overwritten to partition.
     List<DataFile> icebergDataFiles = new ArrayList<>();
+    int i = 0;
+    int total = statesHelper.getNonPostPublishStates().size();
     for (WorkUnitState wus : statesHelper.getNonPostPublishStates()) {
+      i++;
+      if (i % 1000 == 0) {
+        log.info("Processed {} work unit states out of {}", i, total);
+        CopySource.printMemoryStats(-3);
+//        System.gc();
+//        log.info("After gc");
+//        CopySource.printMemoryStats(-4);
+      }
       if (wus.getWorkingState() == WorkingState.SUCCESSFUL) {
         wus.setWorkingState(WorkUnitState.WorkingState.COMMITTED);
       }
@@ -393,6 +407,11 @@ public class CopyDataPublisher extends DataPublisher implements UnpublishedHandl
         }
       }
     }
+//    System.gc();
+    CopySource.printMemoryStats(101);
+    statesHelper.clearNonPublishStep();
+//    System.gc();
+    CopySource.printMemoryStats(102);
 
     // execute `postPublishSteps` after preserving file attributes, as some, like `SetPermissionCommitStep`, will themselves set permissions
     executeCommitSequence(postPublishSteps, icebergDataFiles);

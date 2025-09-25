@@ -48,6 +48,7 @@ import org.apache.gobblin.configuration.ConfigurationKeys;
 import org.apache.gobblin.configuration.State;
 import org.apache.gobblin.converter.initializer.ConverterInitializer;
 import org.apache.gobblin.converter.initializer.ConverterInitializerFactory;
+import org.apache.gobblin.data.management.copy.CopySource;
 import org.apache.gobblin.initializer.Initializer;
 import org.apache.gobblin.destination.DestinationDatasetHandlerService;
 import org.apache.gobblin.metrics.event.EventSubmitter;
@@ -157,14 +158,18 @@ public class GenerateWorkUnitsImpl implements GenerateWorkUnits {
       fs.mkdirs(workDirRoot);
 
       WorkUnitsWithInsights genWUsInsights = generateWorkUnitsForJobStateAndCollectCleanupPaths(jobState, eventSubmitterContext, closer);
+      CopySource.printMemoryStats(94);
       List<WorkUnit> workUnits = genWUsInsights.getWorkUnits();
 
       int numSizeSummaryQuantiles = getConfiguredNumSizeSummaryQuantiles(jobState);
+      CopySource.printMemoryStats(95);
       WorkUnitsSizeSummary wuSizeSummary = digestWorkUnitsSize(workUnits).asSizeSummary(numSizeSummaryQuantiles);
+      CopySource.printMemoryStats(96);
       log.info("Discovered WorkUnits: {}", wuSizeSummary);
       // IMPORTANT: send prior to `writeWorkUnits`, so the volume of work discovered (and bin packed) gets durably measured.  even if serialization were to
       // exceed available memory and this activity execution were to fail, a subsequent re-attempt would know the amount of work, to guide re-config/attempt
       createWorkPreparedSizeDistillationTimer(wuSizeSummary, eventSubmitterContext).stop();
+      CopySource.printMemoryStats(97);
 
       // add any (serialized) mementos before serializing `jobState`, for later `recall` during `CommitActivityImpl`
       genWUsInsights.optWriterMemento.ifPresent(memento ->
@@ -175,9 +180,12 @@ public class GenerateWorkUnitsImpl implements GenerateWorkUnits {
           jobState.setProp(ConfigurationKeys.CONVERTER_INITIALIZERS_SERIALIZED_MEMENTOS_KEY,
               Initializer.AfterInitializeMemento.serialize(memento))
       );
+      CopySource.printMemoryStats(98);
       JobStateUtils.writeWorkUnits(workUnits, workDirRoot, jobState, fs);
+      CopySource.printMemoryStats(99);
       JobStateUtils.writeJobState(jobState, workDirRoot, fs); // ATTENTION: the writing of `JobState` after all WUs signifies WU gen+serialization now complete
 
+      CopySource.printMemoryStats(900);
       String sourceClassName = JobStateUtils.getSourceClassName(jobState);
       return new GenerateWorkUnitsResult(jobState.getTaskCount(), sourceClassName, wuSizeSummary, genWUsInsights.getPathsToCleanUp());
     } catch (ReflectiveOperationException roe) {
@@ -238,13 +246,14 @@ public class GenerateWorkUnitsImpl implements GenerateWorkUnits {
 
     log.info("Starting job " + jobState.getJobId());
     // TODO: report (timer) metrics for workunits preparation
+    CopySource.printMemoryStats(91);
     WorkUnitStream preparedWorkUnitStream = AbstractJobLauncher.prepareWorkUnits(handledWorkUnitStream, jobState);
-
+    CopySource.printMemoryStats(92);
     // TODO: gobblinJobMetricsReporter.reportWorkUnitCountMetrics(this.jobContext.getJobState().getPropAsInt(NUM_WORKUNITS), jobState);
 
     // dump the work unit if tracking logs are enabled (post any materialization for counting)
     WorkUnitStream trackedWorkUnitStream = AbstractJobLauncher.addWorkUnitTrackingPerConfig(preparedWorkUnitStream, jobState, log);
-
+    CopySource.printMemoryStats(93);
     return new WorkUnitsWithInsights(
         AbstractJobLauncher.materializeWorkUnitList(trackedWorkUnitStream),
         pathsToCleanUp,

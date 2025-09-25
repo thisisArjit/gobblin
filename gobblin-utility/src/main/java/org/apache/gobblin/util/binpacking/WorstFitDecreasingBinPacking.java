@@ -63,13 +63,11 @@ public class WorstFitDecreasingBinPacking implements WorkUnitBinPacker {
 
   @Override
   @OverridingMethodsMustInvokeSuper
-  public List<WorkUnit> pack(List<WorkUnit> workUnitsIn, WorkUnitWeighter weighter) {
+  public List<WorkUnit> pack(List<WorkUnit> workUnits, WorkUnitWeighter weighter) {
 
     if (this.maxWeightPerUnit <= 0) { // just return the input
-      return workUnitsIn;
+      return workUnits;
     }
-
-    List<WorkUnit> workUnits = Lists.newArrayList(workUnitsIn);
 
     long smallUnitSize = 0; // total size of work units smaller than maxWeightPerUnit
     int largeUnits = 0; // number of work units larger than maxWeightPerUnit

@@ -55,6 +55,7 @@ import org.apache.gobblin.commit.DeliverySemantics;
 import org.apache.gobblin.configuration.ConfigurationKeys;
 import org.apache.gobblin.configuration.WorkUnitState;
 import org.apache.gobblin.converter.initializer.ConverterInitializerFactory;
+import org.apache.gobblin.data.management.copy.CopySource;
 import org.apache.gobblin.initializer.Initializer;
 import org.apache.gobblin.metastore.StateStore;
 import org.apache.gobblin.metrics.event.EventSubmitter;
@@ -233,7 +234,12 @@ public class CommitActivityImpl implements CommitActivity {
     // NOTE: TaskState dir is assumed to be a sibling to the workunits dir (following conventions of `MRJobLauncher`)
     String jobIdPathName = new Path(workSpec.getWorkUnitsDir()).getParent().getName();
     log.info("TaskStateStore path (name component): '{}' (fs: '{}')", jobIdPathName, fs.getUri());
+    CopySource.printMemoryStats(10);
     Optional<Queue<TaskState>> taskStateQueueOpt = TaskStateCollectorService.deserializeTaskStatesFromFolder(taskStateStore, jobIdPathName, numThreads);
+    CopySource.printMemoryStats(11);
+//    System.gc();
+//    log.info("After GC");
+//    CopySource.printMemoryStats(12);
     return taskStateQueueOpt.map(taskStateQueue ->
         taskStateQueue.stream().peek(taskState ->
                 // CRITICAL: although some `WorkUnit`s, like those created by `CopySource::FileSetWorkUnitGenerator` for each `CopyEntity`

@@ -286,6 +286,19 @@ public class CopySource extends AbstractSource<String, FileAwareInputStream> {
     }
   }
 
+  public static void printMemoryStats(int id) {
+    log.info("Memory Stats for id: " + id);
+    Runtime runtime = Runtime.getRuntime();
+    // Convert bytes to megabytes for readability
+    long totalMemory = runtime.totalMemory() / (1024 * 1024);
+    long freeMemory = runtime.freeMemory() / (1024 * 1024);
+    long usedMemory = totalMemory - freeMemory;
+    long maxMemory = runtime.maxMemory() / (1024 * 1024);
+
+    log.info("Memory Stats: Total Memory (MB): {} Free Memory (MB): {} Used Memory (MB): {} Max Memory (MB): {}",
+        totalMemory, freeMemory, usedMemory, maxMemory);
+  }
+
   private void submitUnfulfilledRequestEventsHelper(List<FileSet<CopyEntity>> fileSetList, String eventName) {
     for (FileSet<CopyEntity> fileSet : fileSetList) {
       GobblinTrackingEvent event =
@@ -381,7 +394,13 @@ public class CopySource extends AbstractSource<String, FileAwareInputStream> {
         log.info("Using " + (useRandomGuidForWorkUnit ? "random" : "deterministic") + " guids for workunits");
 
         long fileSize;
+        int i = 0;
         for (CopyEntity copyEntity : fileSet.getFiles()) {
+          i++;
+          if (i % 1000 == 0) {
+            log.info("Processed " + i + " files");
+            printMemoryStats(i);
+          }
           CopyableDatasetMetadata metadata = new CopyableDatasetMetadata(this.copyableDataset);
           CopyEntity.DatasetAndPartition datasetAndPartition = copyEntity.getDatasetAndPartition(metadata);
 
@@ -427,10 +446,14 @@ public class CopySource extends AbstractSource<String, FileAwareInputStream> {
 
         this.workUnitList.putAll(this.fileSet, workUnitsForPartition);
 
+        printMemoryStats(1);
+//        System.gc();
+//        log.info("After GC stats");
+//        printMemoryStats(2);
+
         return null;
       } catch (IOException ioe) {
-        throw new RuntimeException("Failed to generate work units for dataset " + this.copyableDataset.datasetURN(),
-            ioe);
+        throw new RuntimeException("Failed to generate work units for dataset " + this.copyableDataset.datasetURN(), ioe);
       }
     }
 

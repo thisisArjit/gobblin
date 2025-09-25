@@ -34,6 +34,7 @@ import org.apache.hadoop.fs.Path;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Queues;
 import com.google.common.eventbus.EventBus;
 import com.google.common.io.Closer;
@@ -257,33 +258,55 @@ public class TaskStateCollectorService extends AbstractScheduledService {
     final Queue<TaskState> taskStateQueue = Queues.newConcurrentLinkedQueue();
     AtomicLong numStateStoreMissing = new AtomicLong(0L);
     GrowthMilestoneTracker growthTracker = new GrowthMilestoneTracker();
-    try (ParallelRunner stateSerDeRunner = new ParallelRunner(numDeserializerThreads, null)) {
-      for (final String taskStateName : taskStateNames) {
-        log.debug("Found output task state file " + taskStateName);
-        // Deserialize the TaskState and delete the file
-        stateSerDeRunner.submitCallable(new Callable<Void>() {
-          @Override
-          public Void call() throws Exception {
-            List<TaskState> matchingTaskStates = taskStateStore.getAll(taskStateTableName, taskStateName);
-            if (matchingTaskStates.isEmpty()) {
-              long currNumMissing = numStateStoreMissing.incrementAndGet();
-              // only log selective milestones to avoid flooding log w/ O(100k) stacktraces
-              if (growthTracker.isAnotherMilestone(currNumMissing)) {
-                throw new RuntimeExceptionWithoutStackTrace("missing task state [running total: " + currNumMissing + "] - " + taskStateName);
+    int processedTaskStates = 0;
+    for (List<String> batchTaskStates : Lists.partition(taskStateNames, numDeserializerThreads * 50)) {
+      try (ParallelRunner stateSerDeRunner = new ParallelRunner(numDeserializerThreads, null)) {
+        for (final String taskStateName : batchTaskStates) {
+          log.debug("Found output task state file " + taskStateName);
+          // Deserialize the TaskState and delete the file
+          stateSerDeRunner.submitCallable(new Callable<Void>() {
+            @Override
+            public Void call() throws Exception {
+              List<TaskState> matchingTaskStates = taskStateStore.getAll(taskStateTableName, taskStateName);
+              if (matchingTaskStates.isEmpty()) {
+                long currNumMissing = numStateStoreMissing.incrementAndGet();
+                // only log selective milestones to avoid flooding log w/ O(100k) stacktraces
+                if (growthTracker.isAnotherMilestone(currNumMissing)) {
+                  throw new RuntimeExceptionWithoutStackTrace("missing task state [running total: " + currNumMissing + "] - " + taskStateName);
+                }
+                return null; // otherwise, when not a milestone, silently skip
               }
-              return null; // otherwise, when not a milestone, silently skip
+              taskStateQueue.add(matchingTaskStates.get(0));
+              taskStateStore.delete(taskStateTableName, taskStateName);
+              return null;
             }
-            taskStateQueue.add(matchingTaskStates.get(0));
-            taskStateStore.delete(taskStateTableName, taskStateName);
-            return null;
-          }
-        }, "Deserialize state for " + taskStateName);
+          }, "Deserialize state for " + taskStateName);
+        }
+      } catch (IOException ioe) {
+        log.error("Could not read all task state files [missing final total: " + numStateStoreMissing.get() + "] - ", ioe);
       }
-    } catch (IOException ioe) {
-      log.error("Could not read all task state files [missing final total: " + numStateStoreMissing.get() + "] - ", ioe);
+      processedTaskStates += batchTaskStates.size();
+      log.info("Processed {} out of {} task states", processedTaskStates, taskStateNames.size());
+      printMemoryStats(-1);
+//      System.gc();
+//      log.info("After gc");
+//      printMemoryStats(-2);
     }
     log.info(String.format("Collected task state of %d completed tasks in %s", taskStateQueue.size(), taskStateTableName));
     return Optional.of(taskStateQueue);
+  }
+
+  public static void printMemoryStats(int id) {
+    log.info("Memory Stats for id: " + id);
+    Runtime runtime = Runtime.getRuntime();
+    // Convert bytes to megabytes for readability
+    long totalMemory = runtime.totalMemory() / (1024 * 1024);
+    long freeMemory = runtime.freeMemory() / (1024 * 1024);
+    long usedMemory = totalMemory - freeMemory;
+    long maxMemory = runtime.maxMemory() / (1024 * 1024);
+
+    log.info("Memory Stats: Total Memory (MB): {} Free Memory (MB): {} Used Memory (MB): {} Max Memory (MB): {}",
+        totalMemory, freeMemory, usedMemory, maxMemory);
   }
 
   /**
