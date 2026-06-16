@@ -31,13 +31,16 @@ import java.nio.file.AccessDeniedException;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Queue;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
@@ -568,6 +571,97 @@ public class HadoopUtils {
     } finally {
       ExecutorsUtils.shutdownExecutorService(executorService, Optional.of(log), 1, TimeUnit.SECONDS);
     }
+  }
+
+  /**
+   * Same as {@link #renameRecursively(FileSystem, Path, Path)} but renames the immediate children of {@code from}
+   * in priority order: all children in a lower-priority group are renamed (recursively, to completion) before any
+   * child in the next group begins. Within a single group the renames still run concurrently.
+   *
+   * <p>This is used by Iceberg copy publishing to guarantee that {@code data/} files are committed before
+   * {@code metadata/} files, since Iceberg metadata references data files by path and must never be visible
+   * before the data it points to.</p>
+   *
+   * <p><b>NOTE:</b> ordering is applied at the level of the immediate children of {@code from}. This only separates
+   * {@code data} from {@code metadata} if those are the immediate children of {@code from} (i.e. the rename root sits
+   * at the table root). If they are nested deeper, {@code priorityFn} sees only the wrapper directory and the ordering
+   * is lost.</p>
+   *
+   * @param fileSystem on which the data needs to be moved
+   * @param from path of the data to be moved
+   * @param to path of the data to be moved
+   * @param priorityFn maps an immediate child path of {@code from} to a priority; groups are processed in ascending
+   *                   priority order
+   */
+  public static void renameRecursivelyOrdered(FileSystem fileSystem, Path from, Path to,
+      Function<Path, Integer> priorityFn) throws IOException {
+
+    log.info(String.format("Recursively renaming (ordered) %s in %s to %s.", from, fileSystem.getUri(), to));
+
+    FileSystem throttledFS = getOptionallyThrottledFileSystem(fileSystem, 10000);
+
+    if (!fileSystem.exists(from)) {
+      throw new IOException("Trying to rename a path that does not exist! " + from);
+    }
+
+    FileStatus fromStatus = fileSystem.getFileStatus(from);
+
+    // Fast path: if the whole tree can move atomically (target absent) or it's a single file, ordering is
+    // irrelevant -- defer to the standard concurrent implementation.
+    if (!fromStatus.isDirectory() || !fileSystem.exists(to)) {
+      renameRecursively(fileSystem, from, to);
+      return;
+    }
+
+    // Target exists, so we descend to file level. Group immediate children by priority (TreeMap keeps ascending
+    // order) and fully complete each group before starting the next.
+    Map<Integer, List<FileStatus>> grouped = new TreeMap<>();
+    for (FileStatus child : fileSystem.listStatus(from)) {
+      grouped.computeIfAbsent(priorityFn.apply(child.getPath()), k -> Lists.newArrayList()).add(child);
+    }
+
+    ExecutorService executorService = ScalingThreadPoolExecutor.newScalingThreadPool(1, 100, 100,
+        ExecutorsUtils.newThreadFactory(Optional.of(log), Optional.of("rename-thread-%d")));
+    try {
+      for (Entry<Integer, List<FileStatus>> group : grouped.entrySet()) {
+        Queue<Future<?>> futures = Queues.newConcurrentLinkedQueue();
+        for (FileStatus child : group.getValue()) {
+          Path relativeFilePath = new Path(StringUtils.substringAfter(child.getPath().toString(),
+              from.toString() + Path.SEPARATOR));
+          Path toFilePath = new Path(to, relativeFilePath);
+          futures.add(executorService.submit(
+              new RenameRecursively(throttledFS, child, toFilePath, executorService, futures)));
+        }
+        // Barrier: drain this priority group completely before moving to the next.
+        while (!futures.isEmpty()) {
+          try {
+            futures.poll().get();
+          } catch (ExecutionException | InterruptedException ee) {
+            throw new IOException(ee.getCause());
+          }
+        }
+        log.info(String.format("Completed ordered rename group priority=%d (%d children) under %s.",
+            group.getKey(), group.getValue().size(), from));
+      }
+    } finally {
+      ExecutorsUtils.shutdownExecutorService(executorService, Optional.of(log), 1, TimeUnit.SECONDS);
+    }
+  }
+
+  /**
+   * Default priority for Iceberg distcp publishing: {@code data/} first, {@code metadata/} last, anything else in
+   * between. Intended for use as the {@code priorityFn} of
+   * {@link #renameRecursivelyOrdered(FileSystem, Path, Path, Function)}.
+   */
+  public static int icebergRenamePriority(Path immediateChild) {
+    String name = immediateChild.getName();
+    if ("data".equals(name)) {
+      return 0;
+    }
+    if ("metadata".equals(name)) {
+      return 2;
+    }
+    return 1;
   }
 
   /**
