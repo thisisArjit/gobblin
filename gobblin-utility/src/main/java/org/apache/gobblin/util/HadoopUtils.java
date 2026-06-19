@@ -609,18 +609,23 @@ public class HadoopUtils {
       }
 
       // Phase 1: rename everything except the deferred subtrees (which are collected into `deferred`).
+      log.info(String.format("[ordered-rename] Phase 1: renaming all non-deferred files under %s to %s.", from, to));
       futures.add(executorService.submit(new RenameRecursively(
           throttledFS, fileSystem.getFileStatus(from), to, executorService, futures, deferToLastPhase, deferred)));
       drainFutures(futures);
+      log.info(String.format("[ordered-rename] Phase 1 complete for %s. Deferred %d subtree(s) for phase 2: %s",
+          from, deferred.size(), deferredSourcePaths(deferred)));
 
       // Phase 2: rename the deferred subtrees, now that everything else is in place. No further deferral.
       for (Entry<FileStatus, Path> entry : deferred) {
+        log.info(String.format("[ordered-rename] Phase 2: renaming deferred directory %s to %s.",
+            entry.getKey().getPath(), entry.getValue()));
         futures.add(executorService.submit(new RenameRecursively(
             throttledFS, entry.getKey(), entry.getValue(), executorService, futures, null, null)));
       }
       drainFutures(futures);
 
-      log.info(String.format("Recursive ordered renaming of %s to %s complete (%d deferred subtree(s)).",
+      log.info(String.format("[ordered-rename] Recursive ordered renaming of %s to %s complete (%d deferred subtree(s)).",
           from, to, deferred.size()));
 
     } finally {
@@ -636,6 +641,14 @@ public class HadoopUtils {
         throw new IOException(ee.getCause());
       }
     }
+  }
+
+  private static List<Path> deferredSourcePaths(Queue<Entry<FileStatus, Path>> deferred) {
+    List<Path> paths = Lists.newArrayListWithCapacity(deferred.size());
+    for (Entry<FileStatus, Path> entry : deferred) {
+      paths.add(entry.getKey().getPath());
+    }
+    return paths;
   }
 
   /**
@@ -708,6 +721,8 @@ public class HadoopUtils {
 
         // Hold back deferred subtrees (e.g. Iceberg `metadata/`) for a later phase instead of renaming them now.
         if (this.deferPredicate != null && this.from.isDirectory() && this.deferPredicate.test(this.from.getPath())) {
+          log.info(String.format("[ordered-rename] Deferring directory %s (-> %s) to the last phase.",
+              this.from.getPath(), this.to));
           this.deferred.add(new AbstractMap.SimpleImmutableEntry<>(this.from, this.to));
           return;
         }
